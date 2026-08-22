@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Project Veil — Reference City WebGL</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020711;touch-action:none}
+canvas{display:block;width:100vw;height:100vh}
+#hud{position:fixed;inset:0;pointer-events:none;color:#8fefff;font-family:monospace}
+.brand{position:absolute;left:3vw;top:3vh;letter-spacing:.2em;font-size:10px;text-shadow:0 0 14px #48dfff}
+.brand strong{display:block;font:800 clamp(34px,6vw,76px)/.82 system-ui;color:#effcff;letter-spacing:-.065em;margin-top:8px}
+.brand strong span{color:transparent;-webkit-text-stroke:1px rgba(100,235,255,.62)}
+.info{position:absolute;left:3vw;bottom:3vh;font-size:9px;letter-spacing:.13em;color:#71899d}
+.reticle{position:absolute;left:50%;top:50%;width:30px;height:30px;transform:translate(-50%,-50%);border:1px solid rgba(130,240,255,.18)}
+.reticle:before,.reticle:after{content:"";position:absolute;background:#7defff}
+.reticle:before{width:1px;height:44px;left:50%;top:-7px}.reticle:after{height:1px;width:44px;top:50%;left:-7px}
+.pad{position:absolute;bottom:5vh;width:138px;height:138px;border-radius:50%;border:1px solid rgba(100,230,255,.18);background:radial-gradient(circle,rgba(70,210,255,.09),transparent 66%);pointer-events:auto}
+#move{left:5vw}#look{right:5vw}
+.knob{position:absolute;width:54px;height:54px;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(120,240,255,.48);background:radial-gradient(circle,rgba(80,230,255,.22),rgba(0,20,35,.2));box-shadow:0 0 25px rgba(60,220,255,.16);pointer-events:none}
+.label{position:absolute;inset:0;display:grid;place-items:center;color:#5f8192;font-size:7px;letter-spacing:.18em;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="brand">PROJECT VEIL // REFERENCE CITY STUDY<strong>NIGHT<br><span>METROPOLIS</span></strong></div>
+  <div class="reticle"></div>
+  <div class="info"><span id="stats">STARTING GPU</span> // TOUCH CONTROLS</div>
+  <div class="pad" id="move"><div class="knob"></div><div class="label">MOVE</div></div>
+  <div class="pad" id="look"><div class="knob"></div><div class="label">LOOK</div></div>
+</div>
+
+<script>
+const canvas=document.querySelector("#c");
+const gl=canvas.getContext("webgl2",{antialias:true,powerPreference:"high-performance"});
+if(!gl){document.querySelector("#stats").textContent="WEBGL2 UNAVAILABLE";throw new Error("WebGL2 unavailable");}
+
+const VS=`#version 300 es
+in vec3 p; in vec3 n; in vec3 col; in float emit;
+uniform mat4 mvp,model;
+out vec3 vN,vC,vP; out float vE;
+void main(){vN=mat3(model)*n;vC=col;vP=(model*vec4(p,1.0)).xyz;vE=emit;gl_Position=mvp*vec4(p,1.0);}`;
+
+const FS=`#version 300 es
+precision highp float;
+in vec3 vN,vC,vP; in float vE;
+uniform vec3 lightPos; uniform vec3 camPos;
+out vec4 outColor;
+void main(){
+ vec3 N=normalize(vN), L=normalize(lightPos-vP);
+ float diffuse=max(dot(N,L),0.0);
+ float rim=pow(1.0-max(dot(N,normalize(camPos-vP)),0.0),2.6);
+ float dist=length(camPos-vP);
+ float fog=smoothstep(55.0,150.0,dist);
+ vec3 lit=vC*(.13+.87*diffuse);
+ lit+=vC*rim*.28;
+ lit+=vC*vE*(1.7+1.2*abs(sin(vP.y*3.0)));
+ vec3 fogCol=vec3(.015,.055,.095);
+ lit=mix(lit,fogCol,fog*.68);
+ outColor=vec4(lit,1.0);
+}`;
+
+function shader(type,src){
+ const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+ if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(s));
+ return s;
+}
+const program=gl.createProgram();
+gl.attachShader(program,shader(gl.VERTEX_SHADER,VS));
+gl.attachShader(program,shader(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(program);
+if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+
+const L={
+ p:gl.getAttribLocation(program,"p"),n:gl.getAttribLocation(program,"n"),col:gl.getAttribLocation(program,"col"),emit:gl.getAttribLocation(program,"emit"),
+ mvp:gl.getUniformLocation(program,"mvp"),model:gl.getUniformLocation(program,"model"),light:gl.getUniformLocation(program,"lightPos"),cam:gl.getUniformLocation(program,"camPos")
+};
+
+function I(){let a=new Float32Array(16);a[0]=a[5]=a[10]=a[15]=1;return a}
+function mul(a,b){let o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];return o}
+function perspective(fov,asp,n,f){let o=new Float32Array(16),t=1/Math.tan(fov/2);o[0]=t/asp;o[5]=t;o[10]=(f+n)/(n-f);o[11]=-1;o[14]=2*f*n/(n-f);return o}
+function lookAt(e,c,u){
+ let z=[e[0]-c[0],e[1]-c[1],e[2]-c[2]],zl=Math.hypot(...z);z=z.map(v=>v/zl);
+ let x=[u[1]*z[2]-u[2]*z[1],u[2]*z[0]-u[0]*z[2],u[0]*z[1]-u[1]*z[0]],xl=Math.hypot(...x);x=x.map(v=>v/xl);
+ let y=[z[1]*x[2]-z[2]*x[1],z[2]*x[0]-z[0]*x[2],z[0]*x[1]-z[1]*x[0]];
+ let o=I();o[0]=x[0];o[1]=y[0];o[2]=z[0];o[4]=x[1];o[5]=y[1];o[6]=z[1];o[8]=x[2];o[9]=y[2];o[10]=z[2];
+ o[12]=-(x[0]*e[0]+x[1]*e[1]+x[2]*e[2]);o[13]=-(y[0]*e[0]+y[1]*e[1]+y[2]*e[2]);o[14]=-(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]);return o;
+}
+
+let V=[],N=[],C=[],E=[],IDX=[];
+function quad(P,n,c,em=0){let b=V.length/3;for(const p of P){V.push(...p);N.push(...n);C.push(...c);E.push(em)}IDX.push(b,b+1,b+2,b,b+2,b+3)}
+function box(x,y,z,w,h,d,c){
+ quad([[x,y,z],[x+w,y,z],[x+w,y+h,z],[x,y+h,z]],[0,0,-1],c);
+ quad([[x+w,y,z+d],[x,y,z+d],[x,y+h,z+d],[x+w,y+h,z+d]],[0,0,1],c);
+ quad([[x+w,y,z],[x+w,y,z+d],[x+w,y+h,z+d],[x+w,y+h,z]],[1,0,0],c);
+ quad([[x,y,z+d],[x,y,z],[x,y+h,z],[x,y+h,z+d]],[-1,0,0],c);
+ quad([[x,y+h,z],[x+w,y+h,z],[x+w,y+h,z+d],[x,y+h,z+d]],[0,1,0],c);
+}
+function window(x,y,z,w,h,c,em=.75){quad([[x,y,z],[x+w,y,z],[x+w,y+h,z],[x,y+h,z]],[0,0,-1],c,em)}
+function sideWindow(x,y,z,w,h,c,em=.65){quad([[x,y,z],[x,y,z+w],[x,y+h,z+w],[x,y+h,z]],[1,0,0],c,em)}
+
+let seed=20260822;
+function rnd(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}
+function pick(a){return a[Math.floor(rnd()*a.length)]}
+
+const dark=[[.012,.045,.075],[.018,.025,.055],[.028,.055,.075],[.035,.025,.065]];
+const cyan=[[.10,.72,1],[.25,.9,1],[.06,.48,.68]];
+const white=[[.75,.9,.92],[.48,.78,.82],[.92,.95,.88]];
+const mag=[[.9,.08,.5],[.7,.2,1]];
+const road=[.008,.014,.023];
+
+// Road and sidewalks
+box(-7,-.03,-120,14,.08,145,road);
+box(-16,0,-120,7,.13,145,[.015,.03,.045]);
+box(9,0,-120,7,.13,145,[.015,.03,.045]);
+
+// Dense city: low-rise foreground, mid-rise core, occasional landmark towers.
+for(let z=-112;z<18;z+=6){
+  const depthBand=Math.abs(z);
+  for(let x=-34;x<=34;x+=4.5){
+    if(rnd()<.12)continue;
+    const w=3.0+rnd()*2.2, d=3.4+rnd()*2.2;
+    let h;
+    if(z>-18) h=5+rnd()*10;
+    else if(z>-60) h=9+rnd()*20;
+    else h=14+rnd()*32;
+    if(rnd()<.045)h*=1.8;
+    const bx=x+(rnd()-.5)*1.5, bz=z+(rnd()-.5)*1.5;
+    const base=pick(dark);
+    box(bx-w/2,0,bz-d/2,w,h,d,base);
+
+    // facade window rhythm
+    const rows=Math.floor(h/2.4);
+    const cols=Math.max(2,Math.floor(w/.7));
+    for(let r=0;r<rows;r++)for(let col=0;col<cols;col++){
+      if(rnd()<.30)continue;
+      const wc=rnd()<.68?pick(white):pick(cyan);
+      const ww=Math.min(.34,w/(cols+1)*.7);
+      window(bx-w/2+.35+col*(w-.7)/Math.max(1,cols-1),1.25+r*2.4,bz-d/2-.018,ww,.72,wc,.45+rnd()*.7);
+    }
+
+    // occasional horizontal architectural light bands
+    if(rnd()<.27 && h>14){
+      for(let yy=4;yy<h;yy+=6+Math.floor(rnd()*3))
+        window(bx-w/2+.2,yy,bz-d/2-.025,w-.4,.08,pick(cyan),1.0);
+    }
+
+    // rooftop antenna / red aviation light
+    if(h>24 && rnd()<.38){
+      box(bx-.035,h,bz-.035,.07,2.2,.07,[.16,.17,.19]);
+      window(bx-.09,h+2.15,bz-.09,.18,.18,.18,[1,.02,.035],1.6);
+    }
+  }
+}
+
+// Distinct skyline landmarks.
+function tower(x,z,w,h,d,c,kind){
+ box(x-w/2,0,z-d/2,w,h,d,c);
+ for(let r=0;r<Math.floor(h/2.6);r++){
+   const yy=1.4+r*2.6;
+   for(let col=0;col<Math.max(2,Math.floor(w/.8));col++)
+     if((r+col)%3!==0)window(x-w/2+.25+col*.72,yy,z-d/2-.025,.32,.8,pick([white,cyan]),.85);
+ }
+ if(kind===1){box(x-.05,h,z-.05,.1,4,.1,[.08,.09,.11]);window(x-.14,h+3.8,z-.14,.28,.22,[1,.03,.04],1.7)}
+ if(kind===2){box(x-w*.18,h,z-d*.18,w*.36,2.5,d*.36,[.025,.06,.08]);}
+}
+tower(-16,-72,7,48,6,[.018,.07,.11],1);
+tower(13,-88,9,60,8,[.03,.025,.07],2);
+tower(2,-103,5,72,5,[.02,.065,.075],1);
+tower(27,-64,6,42,6,[.055,.035,.08],0);
+
+// Elevated pedestrian/rail bridge through the city.
+box(-15,8,-28,30,.45,1.2,[.025,.07,.09]);
+for(let x=-15;x<15;x+=2)box(x,8.45,-28,.08,1.1,1.35,pick(cyan));
+for(let x=-15;x<15;x+=3)window(x,8.9,-28.02,1.1,.06,pick(cyan),1);
+
+// Road lane lights
+for(let z=-115;z<15;z+=5)box(-.055,.08,z,.11,.045,2.2,pick(cyan));
+
+// Rain geometry, sparse but continuous
+for(let i=0;i<180;i++){
+  const x=-40+rnd()*80,z=-115+rnd()*120,y=4+rnd()*55;
+  const c=rnd()<.8?[.25,.75,1]:[.7,.9,1];
+  box(x,y,z,.012,.7,.012,c, .25);
+}
+
+const buffers=[];
+function buffer(data,attr,size){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);return b}
+const vb=buffer(V),nb=buffer(N),cb=buffer(C),eb=buffer(E);
+const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint32Array(IDX),gl.STATIC_DRAW);
+function attrib(b,loc,size){gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0)}
+attrib(vb,L.p,3);attrib(nb,L.n,3);attrib(cb,L.col,3);attrib(eb,L.emit,1);
+
+gl.enable(gl.DEPTH_TEST);gl.enable(gl.CULL_FACE);gl.clearColor(.002,.005,.012,1);
+
+let pos=[0,3.8,11],yaw=0,pitch=-.08;
+const move={x:0,y:0},look={x:0,y:0};
+function pad(id,state){
+ const el=document.getElementById(id),knob=el.querySelector(".knob");let active=false;
+ const set=e=>{const r=el.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2;let dx=e.clientX-cx,dy=e.clientY-cy,m=r.width*.34,l=Math.hypot(dx,dy);if(l>m){dx*=m/l;dy*=m/l}knob.style.transform=`translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px))`;state.x=dx/m;state.y=dy/m};
+ const end=()=>{active=false;state.x=state.y=0;knob.style.transform="translate(-50%,-50%)"};
+ el.addEventListener("pointerdown",e=>{active=true;el.setPointerCapture(e.pointerId);set(e)});
+ el.addEventListener("pointermove",e=>{if(active)set(e)});el.addEventListener("pointerup",end);el.addEventListener("pointercancel",end);el.addEventListener("lostpointercapture",end);
+}
+pad("move",move);pad("look",look);
+
+function resize(){const d=Math.min(devicePixelRatio||1,2);canvas.width=innerWidth*d;canvas.height=innerHeight*d}
+addEventListener("resize",resize);resize();
+
+let last=performance.now(),acc=0,frames=0;
+function frame(t){
+ const dt=Math.min((t-last)/1000,.05);last=t;
+ const speed=9;
+ const f=-move.y,s=move.x;
+ pos[0]+=Math.sin(yaw)*f*speed*dt+Math.cos(yaw)*s*speed*dt;
+ pos[2]+=Math.cos(yaw)*f*speed*dt-Math.sin(yaw)*s*speed*dt;
+ yaw+=look.x*2.7*dt;pitch+=look.y*1.9*dt;pitch=Math.max(-.7,Math.min(.4,pitch));
+ const target=[pos[0]+Math.sin(yaw)*20,pos[1]+Math.sin(pitch)*20,pos[2]+Math.cos(yaw)*20];
+ const P=perspective(Math.PI/3,canvas.width/canvas.height,.08,220),Vw=lookAt(pos,target,[0,1,0]),M=I();
+ gl.viewport(0,0,canvas.width,canvas.height);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+ gl.useProgram(program);gl.uniformMatrix4fv(L.mvp,false,mul(P,mul(Vw,M)));gl.uniformMatrix4fv(L.model,false,M);
+ gl.uniform3f(L.light,4,26,6);gl.uniform3f(L.cam,pos[0],pos[1],pos[2]);
+ gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.drawElements(gl.TRIANGLES,IDX.length,gl.UNSIGNED_INT,0);
+ frames++;acc+=dt;
+ if(acc>.6){document.querySelector("#stats").textContent=`WEBGL2 // ${Math.round(frames/acc)} FPS // ${(V.length/3).toLocaleString()} VERTICES // PROCEDURAL REFERENCE CITY`;acc=0;frames=0}
+ requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
